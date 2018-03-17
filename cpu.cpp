@@ -3,7 +3,7 @@
 #include <assert.h>
 #include <cmath>
 
-#include <SDL.h>
+#include <SDL2/SDL.h>
 #include <vector>
 
 typedef uint_least32_t u32;
@@ -38,7 +38,10 @@ namespace CPU
   tempalte<bool write> u8 MemAccess(u16 addr, u8 v=0);
   u8 RB(u16 addr) { return MemAccess<0>(addr); }
   u8 WB(u16 addr, u8 v) { return MemAccess<1>(addr, v); }
+}
 
+namespace CPU
+{
   void tick()
   {
     // PPU clock: 3 times the CPU rate

@@ -2,6 +2,10 @@
 - [Creating a NES emulator in C++11 part 1/2](https://www.youtube.com/watch?v=y71lli8MS8s&t=29s)
 - [Creating a NES emulator in C++11 part 2/2](https://www.youtube.com/watch?v=XZWw745wPXY&t=17s)
 
+## Compile
+```
+$ g++ cpu.cpp -lSDL2 
+```
 
 ## Componets
 - Ricoh 2A03 CPU: Based on the 6502 MOS 8-bit microprocessor.
