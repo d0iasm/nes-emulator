@@ -1,4 +1,4 @@
-#progma once
+#pragma once
 
 #include <stdint.h>
 #include <signal.h>
@@ -33,3 +33,7 @@ struct RegBit
     RegBit& operator++ ()     { return *this = *this + 1; }
     unsigned operator++ (int) { unsigned r = *this; ++*this; return r; }
 };
+
+// Forward declare
+namespace CPU {
+}
