@@ -1,85 +1,75 @@
-#include <stdint.h>
-#include <signal.h>
-#include <assert.h>
-#include <cmath>
+#include <common.h>
 
-#include <SDL2/SDL.h>
-#include <vector>
 
-typedef uint_least32_t u32;
-typedef uint_least16_t u16;
-typedef uint_least8_t u8;
-typedef int_least8_t s8;
-
-template<unsigned bitno, unsigned nbits=1, typename T=u8)
-struct
-{
-  T data;
-  enum { mask = (1u << nbits) - 1u};
-  template<typename T2>
-    RegBit& operator=(T2 val)
-    {:
-      data = (data & ~(mask << bitno)) | ((nbits > 1 ? val & mask : !!val) << bitno);
-      return *this;
-    }
-  operator unsigned() const { return (data >> bitno) & mask; }
-  ResBit& operator++ () { return *this = *this + 1; }
-  unsigned operator++ (int) { unsigned r = *this; ++*this; return r; }
-};
-
-namespace CPU
+namespace CPU /* CPU: Ricoh RP2A03 (based on MOS6502, almost the same as in Commodore 64) */
 {
   u8 RAM[0x800];
-  bool reset = true;
-  bool nmi = false;
-  bool nmi_edge_detected = false;
-  bool intr = false;
+  bool reset=true, nmi=false, nmi_edge_detected=false, intr=false;
 
-  tempalte<bool write> u8 MemAccess(u16 addr, u8 v=0);
-  u8 RB(u16 addr) { return MemAccess<0>(addr); }
-  u8 WB(u16 addr, u8 v) { return MemAccess<1>(addr, v); }
+  template<bool write> u8 MemAccess(u16 addr, u8 v=0);
+  u8 RB(u16 addr)      { return MemAccess<0>(addr); }
+  u8 WB(u16 addr,u8 v) { return MemAccess<1>(addr, v); }
+  void tick();
 }
+
 
 namespace CPU
 {
   void tick()
   {
     // PPU clock: 3 times the CPU rate
-    for (unsigned n=0; n<3; ++n) PPU::tick();
+    for(unsigned n=0; n<3; ++n) PPU::tick();
     // APU clock: 1 times the CPU rate
-    for (unsigned n=0; n<1; ++n) APU::tick();
+    for(unsigned n=0; n<1; ++n) APU::tick();
   }
 
   template<bool write> u8 MemAccess(u16 addr, u8 v)
   {
     // Memory writes are turned into reads while reset is being signalled
-    if (reset && write) return MemAccess<0>(addr);
+    if(reset && write) return MemAccess<0>(addr);
 
     tick();
-    return 0; // TODO
+    // Map the memory from CPU's viewpoint.
+    /**/ if(addr < 0x2000) { u8& r = RAM[addr & 0x7FF]; if(!write)return r; r=v; }
+    else if(addr < 0x4000) return PPU::Access(addr&7, v, write);
+    else if(addr < 0x4018)
+      switch(addr & 0x1F)
+      {
+        case 0x14: // OAM DMA: Copy 256 bytes from RAM into PPU's sprite memory
+          if(write) for(unsigned b=0; b<256; ++b) WB(0x2004, RB((v&7)*0x0100+b));
+          return 0;
+        case 0x15: if(!write) return APU::Read();    APU::Write(0x15,v); break;
+        case 0x16: if(!write) return IO::JoyRead(0); IO::JoyStrobe(v); break;
+        case 0x17: if(!write) return IO::JoyRead(1); // write:passthru
+        default: if(!write) break;
+                   APU::Write(addr&0x1F, v);
+      }
+    else return GamePak::Access(addr, v, write);
+    return 0;
   }
 
-  // CPU resisters
-  u16 PC=0x0000;
-  u8 A=0, X=0, Y=0, S=0;
-  union // Stauts flags
+  // CPU registers:
+  u16 PC=0xC000;
+  u8 A=0,X=0,Y=0,S=0;
+  union /* Status flags: */
   {
     u8 raw;
     RegBit<0> C; // carry
-    RegBit<0> Z; // zero
-    RegBit<0> I; // interrupt enable/disable
-    RegBit<0> D; // decimal mode (unsupported on NES, but flag exists)
-    RegBit<0> V; // overflow
-    RegBit<0> N; // negative
+    RegBit<1> Z; // zero
+    RegBit<2> I; // interrupt enable/disable
+    RegBit<3> D; // decimal mode (unsupported on NES, but flag exists)
+    // 4,5 (0x10,0x20) don't exist
+    RegBit<6> V; // overflow
+    RegBit<7> N; // negative
   } P;
 
-  u16 wrap(u16 oldaddr, u16 newaddr) { return (oldaddr & 0xFF00) + u8(newaddr); }
-  void Misfire(u16 old, u16 addr) { u16 q = wrap(old, addr); if (q != addr) RB(q); }
-  u8 Pop() { return RB(0x100 | u8(++S)); }
-  void Push(u8 v) { WB(0x100 | u8(S--), v); }
+  u16 wrap(u16 oldaddr, u16 newaddr)  { return (oldaddr & 0xFF00) + u8(newaddr); }
+  void Misfire(u16 old, u16 addr) { u16 q = wrap(old, addr); if(q != addr) RB(q); }
+  u8   Pop()        { return RB(0x100 | u8(++S)); }
+  void Push(u8 v)   { WB(0x100 | u8(S--), v); }
 
   template<u16 op> // Execute a single CPU instruction, defined by opcode "op".
-    void Ins() // With template magic, the compiler will literally synthesize > 256 different functions.
+    void Ins()       // With template magic, the compiler will literally synthesize >256 different functions.
     {
       // Note: op 0x100 means "NMI", 0x101 means "Reset", 0x102 means "IRQ". They are implemented in terms of "BRK".
       // User is responsible for ensuring that WB() will not store into memory while Reset is being processed.
@@ -170,42 +160,35 @@ namespace CPU
 
   void Op()
   {
-    // Check the state of NMI flag
+    /* Check the state of NMI flag */
     bool nmi_now = nmi;
 
     unsigned op = RB(PC++);
 
-    if (reset) { 
-      op = ox101; 
-    } else if (nmi_now && !nmi_edge_detected) {
-      op = 0x100;
-      nmi_edge_detected = true;
-    } else if (intr && !P.I) {
-      nmi_edge_detected = false;
-    }
+    if(reset)                              { op=0x101; }
+    else if(nmi_now && !nmi_edge_detected) { op=0x100; nmi_edge_detected = true; }
+    else if(intr && !P.I)                  { op=0x102; }
+    if(!nmi_now) nmi_edge_detected=false;
 
-    // Define function pointers for each opcode (00..FF) and each interrupt (100, 101, 102)
-#define c(n) Ins<Ox##n>, Ins<0x##n1>,
+    // Define function pointers for each opcode (00..FF) and each interrupt (100,101,102)
+#define c(n) Ins<0x##n>,Ins<0x##n+1>,
 #define o(n) c(n)c(n+2)c(n+4)c(n+6)
-
-    static void(*count i[0x108])() = 
+    static void(*const i[0x108])() =
     {
       o(00)o(08)o(10)o(18)o(20)o(28)o(30)o(38)
         o(40)o(48)o(50)o(58)o(60)o(68)o(70)o(78)
         o(80)o(88)o(90)o(98)o(A0)o(A8)o(B0)o(B8)
         o(C0)o(C8)o(D0)o(D8)o(E0)o(E8)o(F0)o(F8) o(100)
     };
-
 #undef o
 #undef c
     i[op]();
 
-    reset = false; 
+    reset = false;
   }
 }
 
-
-int main(int /*argc*/, char** argv)
+int main(int/*argc*/, char** argv)
 {
   // Open the ROM file specified on commandline
   FILE* fp = fopen(argv[1], "rb");
@@ -215,19 +198,19 @@ int main(int /*argc*/, char** argv)
   assert(fgetc(fp)=='N' && fgetc(fp)=='E' && fgetc(fp)=='S' && fgetc(fp)=='\32');
   u8 rom16count = fgetc(fp);
   u8 vrom8count = fgetc(fp);
-  u8 ctrlbyte = fgetc(fp);
-  u8 mappernum = fgetc(fp) | (ctrlbyte>>4);
+  u8 ctrlbyte   = fgetc(fp);
+  u8 mappernum  = fgetc(fp) | (ctrlbyte>>4);
   fgetc(fp);fgetc(fp);fgetc(fp);fgetc(fp);fgetc(fp);fgetc(fp);fgetc(fp);fgetc(fp);
-  if (mappernum >= 0x40) mappernum &= 15;
+  if(mappernum >= 0x40) mappernum &= 15;
   GamePak::mappernum = mappernum;
 
   // Read the ROM data
-  if (rom16count) GamePak::ROM.resize(rom16count * 0x4000);
-  if (vrom8count) GamePak::VRAM.resize(vrom8count * 0x2000);
-  fread (&GamePak::ROM[0], rom16count, 0x4000, fp);
-  fread (&GamePak::VRAM[0], vrom8count, 0x2000, fp);
+  if(rom16count) GamePak::ROM.resize(rom16count * 0x4000);
+  if(vrom8count) GamePak::VRAM.resize(vrom8count * 0x2000);
+  fread(&GamePak::ROM[0], rom16count, 0x4000, fp);
+  fread(&GamePak::VRAM[0], vrom8count, 0x2000, fp);
 
-  fcolse(fp);
+  fclose(fp);
   printf("%u * 16kB ROM, %u * 8kB VROM, mapper %u, ctrlbyte %02X\n", rom16count, vrom8count, mappernum, ctrlbyte);
 
   // Start emulation
@@ -236,9 +219,9 @@ int main(int /*argc*/, char** argv)
   PPU::reg.value = 0;
 
   // Pre-initialize RAM the same way as FCEUX does, to improve TAS sync.
-  for (unsigned a=0; a<0x800; ++a)
+  for(unsigned a=0; a<0x800; ++a)
     CPU::RAM[a] = (a&4) ? 0xFF : 0x00;
 
   // Run the CPU until the program is killed.
-  for (;;) CPU::Op();
+  for(;;) CPU::Op();
 }
