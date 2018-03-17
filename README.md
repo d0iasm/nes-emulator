@@ -4,7 +4,7 @@
 
 ## Compile
 ```
-$ g++ cpu.cpp -lSDL2 
+$ g++ apu.cpp cpu.cpp gamepak.cpp io.cpp ppu.cpp -lSDL2 -I./
 ```
 
 ## Componets
